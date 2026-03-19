@@ -1,0 +1,1 @@
+Create a table called cities with columns id and name. Then insert three Spanish cities.
