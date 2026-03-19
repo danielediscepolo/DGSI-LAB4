@@ -1,99 +1,74 @@
-# Week 04 Report - Function Calling con bucle, wget y SQLite
+﻿# Week 04 - Function Calling con bucle (wget + SQLite)
 
-## Contexto rapido
+## 0. Contexto y objetivo
 
-En esta practica monte un agente con dos tools (`wget` y `execute_sql`) y lo hice funcionar en un loop multi-ronda hasta que el modelo deja de pedir tools.
+En esta practica, como grupo, implementamos un programa en Python donde el LLM puede usar 2 herramientas:
 
-Entorno usado:
+- `wget`: descarga contenido de una URL (con confirmación humana)
+- `execute_sql`: ejecuta SQL sobre SQLite
 
-- Windows + PowerShell para lanzar comandos y guardar evidencias.
-- Multipass (`ai-softeng`) para ejecutar Python, `wget` y `sqlite3`.
-- Carpeta compartida: `C:\Users\pauca\course-workspace` montada en `/home/ubuntu/workspace`.
+La parte clave era hacerlo en bucle de rondas, no en una sola llamada.
 
-Nota real del entorno: en este setup concreto SQLite no podia escribir bien el `.db` dentro de la carpeta montada (errores de readonly/locking). Para que no se rompiera la practica usé `DATABASE_PATH=/tmp/week04/database.db` al ejecutar, y luego verifiqué con `sqlite3` en la VM.
-
-Configuracion `.env`:
-
-- `OPENAI_API_KEY=...`
-- `OPENAI_API_ENDPOINT=https://dashscope-intl.aliyuncs.com/compatible-mode/v1`
-- `MODEL=qwen3.5-122b-a10b`
-
-Tambien dejé:
-
-- `.gitignore` con `.env`, `database.db`, `__pycache__/`, `.venv/`
-- `.env.example` sin secretos
 
 ---
 
-## Step 0 - Research (SQLite, subprocess, wget)
+## 1. Step 0 - Research previo
 
-### SQLite
+### 1.1 SQLite y `sqlite3`
 
-Lo probé con CLI:
+Comprobamos en CLI:
 
 - crear tabla
 - insertar filas
-- consultar
-- ver `.tables` y `.schema`
+- seleccionar datos
+- ver .schema y .tables
 
-Salida real (extracto):
+Lo importante que vimos: SQLite no es un servidor, es un archivo .db. Para esta practica viene bien por simplicidad, aunque para escenarios grandes o mucha concurrencia tendria mas sentido una BD de servidor.
 
-```text
-# SQLite CLI quick test
--- SELECT * FROM demo;
-1|Alice
-2|Bob
--- .tables
-demo
--- .schema demo
-CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT);
--- ls -lh /tmp/test_step0.db
--rw-r--r-- 1 ubuntu ubuntu 8.0K Mar 19 17:24 /tmp/test_step0.db
-```
+Evidencia:
 
-Lo que entendí: SQLite no es servidor, es un fichero. Todo (tablas, indices, etc) queda dentro del `.db`. Es muy comodo para local/dev porque no levantas daemon ni puertos, pero en concurrencia alta o cargas grandes PostgreSQL/MySQL escalan mejor.
+- `evidence/step0_research.txt`
 
-### subprocess.run()
+### 1.2 `subprocess.run()`
 
-Test:
+Probamos un comando con sleep para verificar comportamiento.  
+Conclusion: subprocess.run() bloquea hasta que acaba (sincronizo).
 
-```text
-returncode=0
-stdout=done
-elapsed_seconds=1.01
-```
+Tambien repasamos:
 
-Con eso comprobé que `subprocess.run()` **bloquea** hasta que termina el comando (sincronico).  
-`capture_output=True` captura stdout/stderr en memoria. `text=True` devuelve string y no bytes. `timeout=` evita que se quede colgado indefinidamente.
+- capture_output=True para capturar salida
+- text=True para trabajar con strings
+- timeout para evitar bloqueos largos
 
-Comparado con `subprocess.Popen()`: `Popen` es mas flexible para asincronia/streams largos, pero para esta practica con comandos puntuales `run()` es suficiente.
+Evidencia:
 
-### wget
+- `evidence/step0_research.txt`
 
-Usé:
+### 1.3 `wget`
 
-- `wget -q -O - https://jsonplaceholder.typicode.com/users`
-- `-q` = quiet
-- `-O -` = salida a stdout
+Probamos:
 
-Error real con dominio falso:
+- URL valida
+- URL no existente
 
-```text
-wget_exit_code=4
-```
+Con URL invalida salida codigo de error (exit code 4), y eso nos sirvirá luego para Step 5.
+
+Evidencia:
+
+- `evidence/step0_research.txt`
 
 ---
 
-## Step 1 - Setup + single tool call
+## 2. Step 1 - Setup y una tool call
 
-### Proyecto y dependencias
+Estructura que dejamos en el proyecto:
 
-Preparé `pyproject.toml` con:
+- `tool_loop_agent.py`
+- `.env.example`
+- `.gitignore`
+- `pyproject.toml`
 
-- `openai`
-- `python-dotenv`
-
-### Tool schema inicial (`execute_sql`)
+Schema de `execute_sql` (fragmento):
 
 ```python
 {
@@ -112,86 +87,55 @@ Preparé `pyproject.toml` con:
 }
 ```
 
-### Prueba pedida
+Prueba del paso:
 
-Prompt:
+- prompt para crear tabla test
+- el modelo pidió execute_sql
+- se ejecuta correctamente
 
-`Create a table called test with columns: id INTEGER, name TEXT.`
+Evidencia:
 
-Salida real:
-
-```text
-=== Iteration 1 ===
-[assistant] Requested 1 tool call(s)
-[tool-call] id=call_4bfac0d40d6e4c76bff643b1 name=execute_sql
-[tool-args] {"query": "CREATE TABLE test (id INTEGER, name TEXT)"}
-[tool-result-preview] {"ok": true, "data": {"rowcount": -1, "lastrowid": 0}, "error": null}
-
-=== Iteration 2 ===
-[assistant-final]
-The table `test` has been successfully created with columns `id` (INTEGER) and `name` (TEXT).
-```
-
-Quedó demostrado el single tool call.
+- `evidence/step1_single_tool_call.txt`
 
 ---
 
-## Step 2 - Loop multi-ronda
+## 3. Step 2 - Loop con varias tool calls
 
-Implementé el bucle de tool-calling:
+Implementamos el patrón de loop: llamar al modelo, ejecutar tools, devolver resultados, repetir.
+
+Fragmento del bucle:
 
 ```python
-for iteration in range(1, max_rounds + 1):
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        tools=TOOLS,
-        temperature=temperature,
-    )
-    message = response.choices[0].message
+if not message.tool_calls:
+    final_text = message.content or ""
+    return final_text
 
-    if not message.tool_calls:
-        # STOP condition
-        return final_text
-
-    messages.append({"role": "assistant", "tool_calls": [...]})
-
-    for tc in message.tool_calls:
-        # ejecutar tool real
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "name": tool_name,
-            "content": tool_result,
-        })
+messages.append({"role": "assistant", "tool_calls": [...]})
+...
+messages.append({
+    "role": "tool",
+    "tool_call_id": tc.id,
+    "name": tool_name,
+    "content": tool_result,
+})
 ```
 
-Prueba con prompt de dos pasos:
+Prueba del paso:
 
-`Create a table called cities with columns id and name. Then insert three Spanish cities.`
+- prompt: crear tabla cities e insertar 3 ciudades
+- se observaron llamadas secuenciales de execute_sql
 
-Salida real:
+Evidencia:
 
-```text
-=== Iteration 1 ===
-[tool-call] ... name=execute_sql
-[tool-args] {"query": "CREATE TABLE cities (id INTEGER PRIMARY KEY, name TEXT)"}
+- `evidence/step2_loop_sequence.txt`
 
-=== Iteration 2 ===
-[tool-call] ... name=execute_sql
-[tool-args] {"query": "INSERT INTO cities (name) VALUES ('Madrid'), ('Barcelona'), ('Valencia')"}
-
-=== Iteration 3 ===
-[assistant-final] ...
-```
-
-Aqui se ven dos tool calls secuenciales antes de la respuesta final.
+Como sabe el programa cuándo parar: cuando la respuesta ya no trae tool_calls.
 
 ---
 
-## Step 3 - Tool `wget` con confirmacion humana
+## 4. Step 3 - Tool `wget` con confirmación humana
 
-Schema de `wget`:
+Schema de wget (fragmento):
 
 ```python
 {
@@ -211,246 +155,134 @@ Schema de `wget`:
 }
 ```
 
-Codigo de confirmacion:
+Logica de confirmacion (fragmento):
 
 ```python
 print(f"[confirm] LLM wants to run: {command_text}")
-if confirm_policy == "always":
-    approved = True
-elif confirm_policy == "never":
-    approved = False
-else:
-    answer = input("Allow command? (y/n): ").strip().lower()
-    approved = answer == "y"
-
-if not approved:
+answer = input("Allow command? (y/n): ").strip().lower()
+if answer != "y":
     return json_result(False, error="USER DENIED: command was not executed.")
 ```
 
-### Caso aprobado
+Probamos los 2 escenarios pedidos:
 
-```text
-[tool-call] ... name=wget
-[tool-args] {"url": "https://jsonplaceholder.typicode.com/users"}
-[confirm] LLM wants to run: wget -q -O - https://jsonplaceholder.typicode.com/users
-[confirm] Auto-approval policy active: yes
-[tool-result-preview] {"ok": true, "data": {"command": "...", "returncode": 0, "stdout": "[ ...json... ]"}, "error": null}
-```
+1. aprobación de comando
+2. denegación de comando
 
-### Caso denegado
+Evidencia:
 
-```text
-[confirm] Auto-deny policy active: no
-[tool-result-preview] {"ok": false, "data": {"command": "wget -q -O - https://jsonplaceholder.typicode.com/users"}, "error": "USER DENIED: command was not executed."}
-
-=== Iteration 2 ===
-[assistant-final]
-I cannot execute the download command because it requires explicit user approval, which was not granted.
-```
+- `evidence/step3_wget_approve.txt`
+- `evidence/step3_wget_deny.txt`
 
 ---
 
-## Step 4 - Full test (fetch + store + query)
+## 5. Step 4 - Test completo (fetch + store + query)
 
-Prompt completo:
+Prompt usado:
 
 `Fetch https://jsonplaceholder.typicode.com/users and store the id, name, email, and city of every user in a SQLite table called users. Show me the final contents of the table.`
 
-### Output completo de terminal (run principal)
-
-```text
-Week-04 Tool Loop Agent
-Model: qwen3.5-122b-a10b
-Endpoint: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-Database: /tmp/week04/database.db
-Confirm policy: always
-Prompt: Fetch https://jsonplaceholder.typicode.com/users and store the id, name, email, and city of every user in a SQLite table called users. Show me the final contents of the table.
-
-=== Iteration 1 ===
-[assistant] Requested 1 tool call(s)
-[tool-call] id=call_939f4e38614b401ba2a4f6c3 name=wget
-[tool-args] {"url": "https://jsonplaceholder.typicode.com/users"}
-[confirm] LLM wants to run: wget -q -O - https://jsonplaceholder.typicode.com/users
-[confirm] Auto-approval policy active: yes
-[tool-result-preview] {"ok": true, "data": {"command": "wget -q -O - https://jsonplaceholder.typicode.com/users", "returncode": 0, "stdout": "[ ...json completo de users... ]"}, "error": null}
-
-=== Iteration 2 ===
-[assistant] Requested 1 tool call(s)
-[tool-call] id=call_be177700108a4924877055b4 name=execute_sql
-[tool-args] {"query": "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, city TEXT)"}
-[tool-result-preview] {"ok": true, "data": {"rowcount": -1, "lastrowid": 0}, "error": null}
-
-=== Iteration 3 ===
-[assistant] Requested 1 tool call(s)
-[tool-call] id=call_2e3c409974a744bf88ce4616 name=execute_sql
-[tool-args] {"query": "INSERT INTO users (id, name, email, city) VALUES (1, 'Leanne Graham', 'Sincere@april.biz', 'Gwenborough'), ..., (10, 'Clementina DuBuque', 'Rey.Padberg@karina.biz', 'Lebsackbury')"}
-[tool-result-preview] {"ok": true, "data": {"rowcount": 10, "lastrowid": 10}, "error": null}
-
-=== Iteration 4 ===
-[assistant] Requested 1 tool call(s)
-[tool-call] id=call_d0113c8b1b6648f49113563e name=execute_sql
-[tool-args] {"query": "SELECT * FROM users"}
-[tool-result-preview] {"ok": true, "data": {"columns": ["id", "name", "email", "city"], "rows": [{"id": 1, "name": "Leanne Graham", "email": "Sincere@april.biz", "city": "Gwenborough"}, ..., {"id": 10, "name": "Clementina DuBuque", "email": "Rey.Padberg@karina.biz", "city": "Lebsackbury"}], "rowcount": 10}, "error": null}
-
-=== Iteration 5 ===
-[assistant-final]
-I have successfully fetched the user data from the JSONPlaceholder API, created a SQLite table named `users`, and inserted the `id`, `name`, `email`, and `city` for all 10 users.
-...
-[summary] iterations=5 ...
-```
-
-En esta run fueron **5 iteraciones**.
-
-### Verificacion independiente con sqlite3
-
-```text
-1|Leanne Graham|Sincere@april.biz|Gwenborough
-2|Ervin Howell|Shanna@melissa.tv|Wisokyburgh
-3|Clementine Bauch|Nathan@yesenia.net|McKenziehaven
-4|Patricia Lebsack|Julianne.OConner@kory.org|South Elvis
-5|Chelsey Dietrich|Lucio_Hettinger@annie.ca|Roscoeview
-6|Mrs. Dennis Schulist|Karley_Dach@jasper.info|South Christy
-7|Kurtis Weissnat|Telly.Hoeger@billy.biz|Howemouth
-8|Nicholas Runolfsdottir V|Sherwood@rosamond.me|Aliyaview
-9|Glenna Reichert|Chaim_McDermott@dana.io|Bartholomebury
-10|Clementina DuBuque|Rey.Padberg@karina.biz|Lebsackbury
-```
-
-Coincide con lo que dijo el asistente.
-
----
-
-## Step 5 - Error handling y salida legible
-
-Me aseguré de imprimir por cada tool call:
-
-- nombre del tool
-- argumentos raw
-- preview del resultado
-
-y manejar excepciones con `try/except` devolviendo error al modelo en lugar de romper proceso.
-
-### Caso error 1: URL mala
-
-Prompt:
-
-`Download the content from https://thisdomaindoesnotexist.fake/data`
-
-Salida:
-
-```text
-[tool-call] ... name=wget
-[tool-args] {"url": "https://thisdomaindoesnotexist.fake/data"}
-[tool-result-preview] {"ok": false, "data": {"command": "...", "returncode": 4}, "error": "wget failed: "}
-
-=== Iteration 2 ===
-[assistant-final]
-The download failed because the domain `thisdomaindoesnotexist.fake` does not exist...
-```
-
-No crash.
-
-### Caso error 2: SQL invalido
-
-Prompt:
-
-`Run this SQL statement: INSERT INTO table_that_does_not_exist (id, name) VALUES (1, 'x');`
-
-Salida:
-
-```text
-[tool-call] ... name=execute_sql
-[tool-args] {"query": "INSERT INTO table_that_does_not_exist (id, name) VALUES (1, 'x');"}
-[tool-result-preview] {"ok": false, "data": null, "error": "SQL error: no such table: table_that_does_not_exist"}
-```
-
-No crash.
-
-### Caso error 3: usuario deniega wget
-
-Queda demostrado en Step 3 (deny):
-
-`"error": "USER DENIED: command was not executed."`
-
----
-
-## Preguntas obligatorias
-
-### 1. How does your program know when to stop calling the LLM?
-
-Cuando la respuesta del modelo viene **sin `tool_calls`**. En ese punto tomo `message.content` como respuesta final y paro el loop.
-
-### 2. What is the role of `tool_call_id` in the message protocol?
-
-`tool_call_id` enlaza cada respuesta de tool (`role="tool"`) con la llamada exacta que pidió el asistente. Si no coincide, el protocolo se rompe y la API puede rechazar mensajes o perder contexto de que resultado pertenece a que llamada.
-
-### 3. Why is user confirmation important for `wget` but not for `execute_sql`?
-
-`wget` toca red/exterior y podria descargar desde sitios malos o no esperados. Tiene mas riesgo operativo y de seguridad, por eso metí confirmacion humana.  
-`execute_sql` en este ejercicio opera en una BD local controlada y es mas acotado.
-
-### 4. What happens in the conversation when the user denies a wget command?
-
-El tool devuelve un resultado de error tipo:
-
-`USER DENIED: command was not executed.`
-
-Ese mensaje se añade al historial como `role="tool"`, el modelo lo ve en la siguiente iteracion y responde adaptandose (en mi caso, avisando que no puede completar sin permiso).
-
-### 5. How many iterations did the loop run for the full test prompt? Were you surprised?
-
-Corrió **5 iteraciones** con `qwen3.5-122b-a10b`:
+Flujo observado en nuestra ejecución principal:
 
 1. `wget`
-2. `CREATE TABLE`
-3. `INSERT`
-4. `SELECT`
-5. respuesta final
+2. `execute_sql` para `CREATE TABLE`
+3. `execute_sql` para `INSERT`
+4. `execute_sql` para `SELECT`
+5. respuesta final del asistente
 
-No me sorprendio mucho, era justo el flujo esperado (4 de tools + 1 final).
+Iteraciones del loop en este test: **5**
 
----
+Evidencias:
 
-## Extra challenge (opcional) - Cambio de modelo
+- salida principal: `evidence/step4_full_test.txt`
+- verificación independiente: `evidence/step4_sqlite_verify.txt`
 
-Tambien probé `qwen2.5-vl-72b-instruct` con el mismo prompt.
-
-Observacion real:
-
-- Tardó **10 iteraciones** (vs 5 del modelo grande).
-- En varias rondas generó argumentos mal formados (mezcló JSON con texto `✿FUNCTION✿`), provocando `json.loads` error:
-  - `Invalid JSON arguments: Extra data...`
-- Finalmente lo consiguió, pero mucho mas torpe.
-
-Conclusion: para function calling estructurado, el modelo importa bastante. Mas barato no siempre significa inutil, pero si puede meter mas friccion/errores en producción.
+La verificación con sqlite3 devolvió las 10 filas esperadas.
 
 ---
 
-## Link al repositorio
+## 6. Step 5 - Salida legible y manejo de errores
 
-Repositorio (ruta prevista de entrega):
+Mejoramos logs para mostrar:
 
-`https://github.com/<tu-usuario>/course-workspace/tree/main/week-04`
+- nombre del tool
+- argumentos
+- preview del resultado
+
+Y protegimos ejecución con try/except para evitar ca­da del programa.
+
+Errores probados:
+
+1. URL invalida
+2. SQL invalido (tabla inexistente)
+3. denegación de wget
+
+Evidencias:
+
+- `evidence/step5_bad_url.txt`
+- `evidence/step5_invalid_sql.txt`
+- `evidence/step3_wget_deny.txt`
+
+En todos los casos el programa siguió funcionando y devolvió error controlado al modelo.
 
 ---
 
-## Archivos clave entregados
+## 7. Preguntas obligatorias
 
-- `week-04/tool_loop_agent.py`
-- `week-04/.env.example`
-- `week-04/.gitignore`
-- `week-04/report.md`
-- Evidencias en `week-04/evidence/*.txt`
+### 1) How does your program know when to stop calling the LLM?
+
+Para cuando message.tool_calls está vacío. En ese punto se toma message.content como respuesta final.
+
+### 2) What is the role of `tool_call_id` in the message protocol?
+
+Permite enlazar cada mensaje role=tool con la llamada exacta que pidió el asistente. Sin eso, la conversación de tools se descoordina.
+
+### 3) Why is user confirmation important for the `wget` tool but not for `execute_sql`?
+
+`wget` toca red y recursos externos, por eso requiere validacion humana.  
+`execute_sql` en este ejercicio está limitado a una BD local controlada.
+
+### 4) What happens in the conversation when the user denies a wget command?
+
+Se devuelve un resultado de tool tipo `USER DENIED...`, se añade al historial, y el modelo responde adaptandose a esa denegación.
+
+### 5) How many iterations did the loop run for the full test prompt? Were you surprised?
+
+En nuestra ejecución principal fueron 5 iteraciones. No nos sorprendió, era el número esperado para ese flujo.
 
 ---
 
-## Comando de generacion PDF
+## 8. Extra challenge (opcional) - Â¿Importa el modelo?
 
-```bash
-pandoc report.md -o report.pdf --pdf-engine=xelatex
-```
+Probamos tambien `qwen2.5-vl-72b-instruct` con el mismo prompt.
+Observamos mas iteraciones y mas errores de formato en argumentos de tool.
 
-## Anexo A - Output completo Step 4 raw
+Evidencia:
+
+- `evidence/extra_model_compare_qwen2_5_vl_72b.txt`
+
+Conclusión: sí­ importa, bastante, para function calling robusto.
+
+---
+
+## 9. Seguridad de API key
+
+Verificado en el proyecto:
+
+- `.env` no se sube
+- `.env.example` incluido
+- `.gitignore` contiene:
+  - `.env`
+  - `database.db`
+  - `__pycache__/`
+  - `.venv/`
+
+---
+
+---
+
+## 11. Anexo A - Salida completa Step 4 (raw)
+
 ```text
 Week-04 Tool Loop Agent
 Model: qwen3.5-122b-a10b
@@ -507,7 +339,8 @@ Here are the final contents of the `users` table:
 [summary] iterations=5 final_text_preview=I have successfully fetched the user data from the JSONPlaceholder API, created a SQLite table named `users`, and inserted the `id`, `name`, `email`, and `city` for all 10 users. H...(truncated)
 ```
 
-## Anexo B - Verificacion sqlite3 raw
+## 12. Anexo B - Verificación SQLite independiente (raw)
+
 ```text
 1|Leanne Graham|Sincere@april.biz|Gwenborough
 2|Ervin Howell|Shanna@melissa.tv|Wisokyburgh
@@ -520,3 +353,5 @@ Here are the final contents of the `users` table:
 9|Glenna Reichert|Chaim_McDermott@dana.io|Bartholomebury
 10|Clementina DuBuque|Rey.Padberg@karina.biz|Lebsackbury
 ```
+
+---
