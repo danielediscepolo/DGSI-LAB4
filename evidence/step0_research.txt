@@ -1,0 +1,33 @@
+# SQLite CLI quick test
+-- SELECT * FROM demo;
+1|Alice
+2|Bob
+-- .tables
+demo
+-- .schema demo
+CREATE TABLE demo (id INTEGER PRIMARY KEY, name TEXT);
+-- ls -lh /tmp/test_step0.db
+-rw-r--r-- 1 ubuntu ubuntu 8.0K Mar 19 17:24 /tmp/test_step0.db
+
+# subprocess.run sync test
+returncode=0
+stdout=done
+elapsed_seconds=1.01
+
+# wget success test
+[
+  {
+    "id": 1,
+    "name": "Leanne Graham",
+    "username": "Bret",
+    "email": "Sincere@april.biz",
+    "address": {
+      "street": "Kulas Light",
+      "suite": "Apt. 556",
+      "city": "Gwenborough",
+      "zipcode": "92998-3874",
+      "geo": {
+    
+
+# wget bad URL test
+wget_exit_code=4
