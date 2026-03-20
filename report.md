@@ -1,57 +1,12 @@
-﻿# Week 04 - Function Calling con bucle (wget + SQLite)
+﻿# DGSI-LAB4
 
-## 0. Contexto y objetivo
+## Step 0 - Research previo (resumen corto)
 
-En esta practica, como grupo, implementamos un programa en Python donde el LLM puede usar 2 herramientas:
+En esta parte probé tres cosas: `sqlite3`, `subprocess.run()` y `wget`.
 
-- `wget`: descarga contenido de una URL (con confirmación humana)
-- `execute_sql`: ejecuta SQL sobre SQLite
-
-La parte clave era hacerlo en bucle de rondas, no en una sola llamada.
-
-
----
-
-## 1. Step 0 - Research previo
-
-### 1.1 SQLite y `sqlite3`
-
-Comprobamos en CLI:
-
-- crear tabla
-- insertar filas
-- seleccionar datos
-- ver .schema y .tables
-
-Lo importante que vimos: SQLite no es un servidor, es un archivo .db. Para esta practica viene bien por simplicidad, aunque para escenarios grandes o mucha concurrencia tendria mas sentido una BD de servidor.
-
-Evidencia:
-
-- `evidence/step0_research.txt`
-
-### 1.2 `subprocess.run()`
-
-Probamos un comando con sleep para verificar comportamiento.  
-Conclusion: subprocess.run() bloquea hasta que acaba (sincronizo).
-
-Tambien repasamos:
-
-- capture_output=True para capturar salida
-- text=True para trabajar con strings
-- timeout para evitar bloqueos largos
-
-Evidencia:
-
-- `evidence/step0_research.txt`
-
-### 1.3 `wget`
-
-Probamos:
-
-- URL valida
-- URL no existente
-
-Con URL invalida salida codigo de error (exit code 4), y eso nos sirvirá luego para Step 5.
+- SQLite: confirmé que todo vive en un archivo `.db`, no hay servidor separado.
+- `subprocess.run()`: lo vi bloqueante (sincrono), y revisé `capture_output`, `text` y `timeout`.
+- `wget`: con URL buena devuelve contenido, con URL mala devuelve error (codigo 4).
 
 Evidencia:
 
@@ -59,39 +14,26 @@ Evidencia:
 
 ---
 
-## 2. Step 1 - Setup y una tool call
+## Step 1 - Single tool call
 
-Estructura que dejamos en el proyecto:
+Implementé schema y función de `execute_sql`, y lancé un prompt para crear tabla.
+El modelo pidió la tool correctamente y la tabla se creó.
 
-- `tool_loop_agent.py`
-- `.env.example`
-- `.gitignore`
-- `pyproject.toml`
-
-Schema de `execute_sql` (fragmento):
+Fragmento de schema:
 
 ```python
 {
-    "type": "function",
-    "function": {
-        "name": "execute_sql",
-        "description": "Run SQL against local SQLite database.db.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"}
-            },
-            "required": ["query"],
-        },
-    },
+  "type": "function",
+  "function": {
+    "name": "execute_sql",
+    "parameters": {
+      "type": "object",
+      "properties": {"query": {"type": "string"}},
+      "required": ["query"]
+    }
+  }
 }
 ```
-
-Prueba del paso:
-
-- prompt para crear tabla test
-- el modelo pidió execute_sql
-- se ejecuta correctamente
 
 Evidencia:
 
@@ -99,123 +41,84 @@ Evidencia:
 
 ---
 
-## 3. Step 2 - Loop con varias tool calls
+## Step 2 - Loop con llamadas secuenciales
 
-Implementamos el patrón de loop: llamar al modelo, ejecutar tools, devolver resultados, repetir.
+Añadí el bucle de rondas: mientras haya `tool_calls`, ejecutar tool y seguir.
+Parada cuando ya no hay tool call.
 
-Fragmento del bucle:
+Fragmento del control:
 
 ```python
 if not message.tool_calls:
-    final_text = message.content or ""
-    return final_text
-
-messages.append({"role": "assistant", "tool_calls": [...]})
-...
-messages.append({
-    "role": "tool",
-    "tool_call_id": tc.id,
-    "name": tool_name,
-    "content": tool_result,
-})
+    print(message.content)
+    break
 ```
 
-Prueba del paso:
+Prueba hecha:
 
-- prompt: crear tabla cities e insertar 3 ciudades
-- se observaron llamadas secuenciales de execute_sql
+- crear tabla `cities`
+- insertar 3 ciudades
 
 Evidencia:
 
 - `evidence/step2_loop_sequence.txt`
 
-Como sabe el programa cuándo parar: cuando la respuesta ya no trae tool_calls.
+![Loop delle iterazioni](image/02_loop.png)
 
 ---
 
-## 4. Step 3 - Tool `wget` con confirmación humana
+## Step 3 - wget con confirmacion humana
 
-Schema de wget (fragmento):
+En este paso agregué confirmación antes de ejecutar `wget`.
+Si se deniega, se devuelve mensaje al modelo y no se ejecuta comando.
 
-```python
-{
-    "type": "function",
-    "function": {
-        "name": "wget",
-        "description": "Fetch content from a URL using system wget. This tool requires explicit user approval before running.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "flags": {"type": "string"},
-            },
-            "required": ["url"],
-        },
-    },
-}
-```
-
-Logica de confirmacion (fragmento):
+Fragmento:
 
 ```python
-print(f"[confirm] LLM wants to run: {command_text}")
-answer = input("Allow command? (y/n): ").strip().lower()
+answer = input("Allow command? (y/n): ")
 if answer != "y":
-    return json_result(False, error="USER DENIED: command was not executed.")
+    return "USER DENIED: command was not executed."
 ```
 
-Probamos los 2 escenarios pedidos:
+Evidencias:
 
-1. aprobación de comando
-2. denegación de comando
+- aprobado: `evidence/step3_wget_approve.txt`
+- denegado: `evidence/step3_wget_deny.txt`
 
-Evidencia:
-
-- `evidence/step3_wget_approve.txt`
-- `evidence/step3_wget_deny.txt`
+![Prompt wget e richiesta di conferma](image/03_wget.png)
 
 ---
 
-## 5. Step 4 - Test completo (fetch + store + query)
+## Step 4 - Test completo fetch + store + query
 
 Prompt usado:
 
 `Fetch https://jsonplaceholder.typicode.com/users and store the id, name, email, and city of every user in a SQLite table called users. Show me the final contents of the table.`
 
-Flujo observado en nuestra ejecución principal:
+Resultado:
 
-1. `wget`
-2. `execute_sql` para `CREATE TABLE`
-3. `execute_sql` para `INSERT`
-4. `execute_sql` para `SELECT`
-5. respuesta final del asistente
-
-Iteraciones del loop en este test: **5**
+- se ejecutaron 5 iteraciones
+- se descargaron usuarios
+- se creó tabla
+- se insertaron datos
+- se consultó tabla final
 
 Evidencias:
 
-- salida principal: `evidence/step4_full_test.txt`
-- verificación independiente: `evidence/step4_sqlite_verify.txt`
+- run principal: `evidence/step4_full_test.txt`
+- verificacion sqlite: `evidence/step4_sqlite_verify.txt`
 
-La verificación con sqlite3 devolvió las 10 filas esperadas.
+![Schermata iniziale](image/01_initial.png)
 
 ---
 
-## 6. Step 5 - Salida legible y manejo de errores
+## Step 5 - Manejo de errores
 
-Mejoramos logs para mostrar:
+Probé errores sin que el programa se cayera:
 
-- nombre del tool
-- argumentos
-- preview del resultado
-
-Y protegimos ejecución con try/except para evitar ca­da del programa.
-
-Errores probados:
-
-1. URL invalida
-2. SQL invalido (tabla inexistente)
-3. denegación de wget
+- URL inválida
+- SQL inválido
+- denegación manual de `wget`
 
 Evidencias:
 
@@ -223,65 +126,55 @@ Evidencias:
 - `evidence/step5_invalid_sql.txt`
 - `evidence/step3_wget_deny.txt`
 
-En todos los casos el programa siguió funcionando y devolvió error controlado al modelo.
+![Esempio: wget negato / errore](image/06_error.png)
+![Step finale / risultato della fase 5](image/05_step5.png)
 
 ---
 
-## 7. Preguntas obligatorias
+## Preguntas obligatorias
 
-### 1) How does your program know when to stop calling the LLM?
+1. How does your program know when to stop calling the LLM?
 
-Para cuando message.tool_calls está vacío. En ese punto se toma message.content como respuesta final.
+Mi programa deja de llamar al modelo cuando la respuesta ya no trae ninguna petición de herramienta. Mientras el modelo sigue pidiendo acciones, el bucle continúa. En cambio, cuando devuelve una respuesta normal, sin pedir nada más, el programa entiende que esa ya es la respuesta final y ahí se para.
 
-### 2) What is the role of `tool_call_id` in the message protocol?
+2. What is the role of tool_call_id in the message protocol?
 
-Permite enlazar cada mensaje role=tool con la llamada exacta que pidió el asistente. Sin eso, la conversación de tools se descoordina.
+Sirve para relacionar cada resultado con la llamada concreta que hizo antes el modelo. O sea, es como la forma de no mezclar una respuesta de una herramienta con otra. Gracias a eso, el sistema sabe exactamente qué resultado pertenece a qué petición.
 
-### 3) Why is user confirmation important for the `wget` tool but not for `execute_sql`?
+3. Why is user confirmation important for wget but not for execute_sql?
 
-`wget` toca red y recursos externos, por eso requiere validacion humana.  
-`execute_sql` en este ejercicio está limitado a una BD local controlada.
+Porque la descarga desde internet implica una acción externa y ahí tiene más sentido pedir permiso antes de ejecutarla. En cambio, la otra herramienta trabaja sobre la base de datos local de la práctica, así que estaba mucho más controlada y no tenía el mismo nivel de riesgo.
 
-### 4) What happens in the conversation when the user denies a wget command?
+4. What happens in the conversation when the user denies a wget command?
 
-Se devuelve un resultado de tool tipo `USER DENIED...`, se añade al historial, y el modelo responde adaptandose a esa denegación.
+Cuando el usuario no da permiso, la descarga no se ejecuta. Ese resultado se añade igualmente a la conversación y el modelo lo ve en la siguiente ronda. Entonces responde teniendo en cuenta que no pudo hacer esa parte, en lugar de inventarse un resultado como si la descarga hubiera funcionado.
 
-### 5) How many iterations did the loop run for the full test prompt? Were you surprised?
+5. How many iterations did the loop run for the full test prompt? Were you surprised?
 
-En nuestra ejecución principal fueron 5 iteraciones. No nos sorprendió, era el número esperado para ese flujo.
-
----
-
-## 8. Extra challenge (opcional) - Â¿Importa el modelo?
-
-Probamos tambien `qwen2.5-vl-72b-instruct` con el mismo prompt.
-Observamos mas iteraciones y mas errores de formato en argumentos de tool.
-
-Evidencia:
-
-- `evidence/extra_model_compare_qwen2_5_vl_72b.txt`
-
-Conclusión: sí­ importa, bastante, para function calling robusto.
+En mi caso fueron cinco iteraciones. Primero hizo la descarga, luego creó la tabla, después insertó los datos, luego consultó el contenido y al final dio la respuesta final. La verdad es que no me sorprendió demasiado, porque viendo la tarea era bastante lógico que hiciera más o menos esos pasos.
 
 ---
 
-## 9. Seguridad de API key
+## Seguridad API key
 
-Verificado en el proyecto:
+Checklist cumplido:
 
-- `.env` no se sube
-- `.env.example` incluido
-- `.gitignore` contiene:
-  - `.env`
-  - `database.db`
-  - `__pycache__/`
-  - `.venv/`
+- `.env` fuera de git
+- `.env.example` presente
+- `.gitignore` con `.env`, `database.db`, `__pycache__/`, `.venv/`
 
 ---
 
+## Repositorio
+
+Link:
+
+`https://github.com/danielediscepolo/DGSI-LAB4`
+
+
 ---
 
-## 11. Anexo A - Salida completa Step 4 (raw)
+## Anexo A - Output completo del test principal
 
 ```text
 Week-04 Tool Loop Agent
@@ -339,7 +232,7 @@ Here are the final contents of the `users` table:
 [summary] iterations=5 final_text_preview=I have successfully fetched the user data from the JSONPlaceholder API, created a SQLite table named `users`, and inserted the `id`, `name`, `email`, and `city` for all 10 users. H...(truncated)
 ```
 
-## 12. Anexo B - Verificación SQLite independiente (raw)
+## Anexo B - Verificacion sqlite independiente
 
 ```text
 1|Leanne Graham|Sincere@april.biz|Gwenborough
@@ -354,4 +247,3 @@ Here are the final contents of the `users` table:
 10|Clementina DuBuque|Rey.Padberg@karina.biz|Lebsackbury
 ```
 
----
